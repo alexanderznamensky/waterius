@@ -1,0 +1,18 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Waterius",
+        "description": "Введите Token для account.waterius.ru",
+        "data": {
+          "name": "Название",
+          "token": "Token",
+          "scan_interval": "Интервал обновления (мин)"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "Токен не должен быть пустым"
+    }
+  }
+}
