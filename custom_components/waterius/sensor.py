@@ -32,8 +32,14 @@ async def async_setup_entry(
 
     entities: list[SensorEntity] = [WateriusSummarySensor(entry, coordinator)]
 
-    for source_id, source_name in (coordinator.data.sources or {}).items():
+    # sources теперь: Dict[id, raw_source_dict]
+    for source_id, source in (coordinator.data.sources or {}).items():
         channels = coordinator.data.channels_by_source.get(source_id, [])
+
+        if isinstance(source, dict):
+            source_name = str(source.get("name") or "").strip() or f"Source {source_id}"
+        else:
+            source_name = str(source or "").strip() or f"Source {source_id}"
 
         group_dc: Optional[str] = None
         for ch in channels:
@@ -166,6 +172,17 @@ class WateriusChannelSensor(_BaseWateriusEntity):
         if not ch:
             return {}
         attrs = build_channel_attrs(ch.raw, ch.uk_vals)
+
+        try:
+            sources = getattr(self._coordinator.data, "sources", {}) or {}
+            src = sources.get(self._source_id)
+            if isinstance(src, dict):
+                lw = src.get("last_wakeup")
+                if lw:
+                    attrs["Передача в Ватериус"] = lw
+        except Exception:
+            pass
+
         return attrs
 
 
@@ -231,11 +248,23 @@ class WateriusExportDiagnosticSensor(_BaseWateriusEntity):
         tarif_raw = (raw.get("tarif_ended") or "").strip()
         days_left = compute_days_left(tarif_raw)
         personal_account = parse_personal_account(raw.get("title4"))
-        return {
+
+        last_wakeup = None
+        try:
+            sources = getattr(self._coordinator.data, "sources", {}) or {}
+            src = sources.get(self._source_id)
+            if isinstance(src, dict):
+                last_wakeup = src.get("last_wakeup")
+        except Exception:
+            pass
+
+        attrs: Dict[str, Any] = {
             "Название устройства": self._source_name,
             "УК": raw.get("title2"),
             "Лицевой счёт": personal_account,
             "Дата отправки": raw.get("send_date_description"),
             "Телефон пользователя": raw.get("user_contact"),
             "Дней до оплаты": days_left,
+            "Передача в Ватериус": last_wakeup,
         }
+        return attrs

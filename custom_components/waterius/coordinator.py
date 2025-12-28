@@ -33,7 +33,7 @@ class WateriusExport:
 
 @dataclass
 class WateriusData:
-    sources: Dict[int, str]
+    sources: Dict[int, Dict[str, Any]]
     channels_by_source: Dict[int, List[WateriusChannel]]
     exports_by_source: Dict[int, Dict[int, WateriusExport]]
 
@@ -51,13 +51,16 @@ class WateriusCoordinator(DataUpdateCoordinator[WateriusData]):
     async def _async_update_data(self) -> WateriusData:
         try:
             sources_raw = await self.api.fetch_sources(SOURCES_URL)
-            sources: Dict[int, str] = {}
+
+            sources: Dict[int, Dict[str, Any]] = {}
             for src in sources_raw:
-                if "id" in src and "name" in src:
-                    try:
-                        sources[int(src["id"])] = str(src["name"])
-                    except Exception:
-                        continue
+                if "id" not in src:
+                    continue
+                try:
+                    sid = int(src["id"])
+                except Exception:
+                    continue
+                sources[sid] = src
 
             channels_raw = await self.api.fetch_channels(CHANNELS_URL)
 

@@ -64,9 +64,9 @@ def build_channel_attrs(ch_raw: Dict[str, Any], uk_vals: Dict[str, Any]) -> Dict
 
     attrs.update(
         {
-            "Предыдущий период": uk_vals.get("prev_period_value", "ошибка УК"),
-            "Текущий период": uk_vals.get("curr_period_value", "ошибка УК"),
-            "Дата передачи": uk_vals.get("timestamp"),
+            "Значение в предыдущем периоде": uk_vals.get("prev_period_value", "ошибка УК"),
+            "Значение в текущем периоде": uk_vals.get("curr_period_value", "ошибка УК"),
+            "Передача в УК": uk_vals.get("timestamp"),
         }
     )
     return attrs
