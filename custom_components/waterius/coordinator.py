@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Dict, List, Set
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -39,12 +40,13 @@ class WateriusData:
 
 
 class WateriusCoordinator(DataUpdateCoordinator[WateriusData]):
-    def __init__(self, hass: HomeAssistant, api: WateriusApi, update_interval: timedelta) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, api: WateriusApi, update_interval: timedelta) -> None:
         super().__init__(
             hass,
             logger=__import__("logging").getLogger(__name__),
             name="Waterius",
             update_interval=update_interval,
+            config_entry=entry,
         )
         self.api = api
 

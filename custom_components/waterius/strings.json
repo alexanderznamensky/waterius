@@ -3,16 +3,37 @@
     "step": {
       "user": {
         "title": "Waterius",
-        "description": "Введите Token для account.waterius.ru",
+        "description": "Сначала войдите на https://account.waterius.ru/ в браузере. Затем откройте https://account.waterius.ru/api/user/token/, скопируйте значение после строки «Ваш токен:» и вставьте его ниже. Источник sensor.* используется только как значение для отправки в УК; serial0 и data_type0 берутся из Waterius API.",
         "data": {
           "name": "Название",
-          "token": "Token",
-          "scan_interval": "Интервал обновления (мин)"
+          "token": "Token Waterius",
+          "scan_interval": "Интервал обновления данных Waterius (мин)",
+          "uc_source_entity": "Источник значения для отправки в УК (sensor.*)",
+          "uc_send_interval": "Интервал автоматической отправки в УК (мин)"
         }
       }
     },
     "error": {
-      "invalid_token": "Токен не должен быть пустым"
+      "invalid_token": "Token не должен быть пустым",
+      "cannot_connect": "Не удалось проверить token Waterius. Сначала войдите на account.waterius.ru, затем откройте /api/user/token/ и скопируйте token."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Настройки Waterius",
+        "description": "Для обновления token сначала войдите на https://account.waterius.ru/, затем откройте https://account.waterius.ru/api/user/token/ и скопируйте значение после «Ваш токен:». Источник sensor.* используется только как значение для отправки в УК; остальные данные берутся из Waterius API.",
+        "data": {
+          "token": "Token Waterius",
+          "scan_interval": "Интервал обновления данных Waterius (мин)",
+          "uc_source_entity": "Источник значения для отправки в УК (sensor.*)",
+          "uc_send_interval": "Интервал автоматической отправки в УК (мин)"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "Token не должен быть пустым",
+      "cannot_connect": "Не удалось проверить token Waterius"
     }
   }
 }

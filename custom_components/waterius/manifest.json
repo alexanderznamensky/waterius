@@ -1,11 +1,13 @@
 {
   "domain": "waterius",
-  "name": "Waterius",
-  "version": "1.0.14",
+  "name": "Ватериус",
+  "version": "1.0.23",
   "documentation": "https://github.com/alexanderznamensky/waterius",
   "issue_tracker": "https://github.com/alexanderznamensky/waterius/issues",
   "dependencies": [],
-  "codeowners": ["@alexanderznamensky"],
+  "codeowners": [
+    "@alexanderznamensky"
+  ],
   "config_flow": true,
   "requirements": [],
   "iot_class": "cloud_polling"

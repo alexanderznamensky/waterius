@@ -23,4 +23,15 @@ send_reading:
 
 send_all:
   name: Send all readings
-  description: Отправить текущие last_value по всем каналам, которые есть в интеграции.
+  description: Отправить текущие last_value по всем каналам, которые есть в интеграции, на account.waterius.ru.
+
+send_configured_reading:
+  name: Send configured reading
+  description: Отправить показание из выбранного sensor.* на https://uc.waterius.ru/ с параметрами из конфигуратора интеграции.
+  fields:
+    entry_id:
+      name: Config entry ID
+      description: Необязательно. Нужно только если добавлено несколько экземпляров интеграции Waterius.
+      required: false
+      selector:
+        text:
