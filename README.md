@@ -5,7 +5,7 @@
 [![GitHub Release](https://img.shields.io/github/release/alexanderznamensky/waterius.svg)](https://github.com/alexanderznamensky/waterius/releases)
 [![License](https://img.shields.io/github/license/alexanderznamensky/waterius.svg)](LICENSE)
 
-Интеграция для Home Assistant, которая позволяет передавать и получать показания счётчиков воды, электроэнергии (и другие, таки как ГАЗ, питьевая вода,  - не проверено) из сервиса [account.waterius.ru](https://account.waterius.ru).
+Интеграция для Home Assistant, которая позволяет синхронизировать показания счётчиков воды, электроэнергии (ГАЗ, питьевая вода,  - не проверено) из сервиса [account.waterius.ru](https://account.waterius.ru).
 
 *Home Assistant integration for retrieving water and electricity meter readings from the [account.waterius.ru](https://account.waterius.ru) service.*
 
