@@ -61,18 +61,23 @@ async def async_setup_entry(
                 )
             )
 
+        # Always create one due-date diagnostic sensor for every Waterius source.
+        # Waterius may expose the export/UK relation only after setup or on a later refresh.
+        # If an export already exists, keep the legacy export-based unique_id so upgrades
+        # do not create a duplicate entity. Otherwise use a stable source-based unique_id;
+        # the sensor will become available automatically when an export appears later.
         exports = (coordinator.data.exports_by_source or {}).get(source_id, {})
-        for export_id in sorted(exports.keys()):
-            entities.append(
-                WateriusExportDiagnosticSensor(
-                    entry,
-                    coordinator,
-                    source_id=source_id,
-                    source_name=source_name,
-                    export_id=export_id,
-                    group_device_class=group_dc,
-                )
+        primary_export_id = sorted(exports.keys())[0] if exports else None
+        entities.append(
+            WateriusExportDiagnosticSensor(
+                entry,
+                coordinator,
+                source_id=source_id,
+                source_name=source_name,
+                export_id=primary_export_id,
+                group_device_class=group_dc,
             )
+        )
 
     async_add_entities(entities, update_before_add=False)
 
@@ -211,7 +216,7 @@ class WateriusExportDiagnosticSensor(_BaseWateriusEntity):
         *,
         source_id: int,
         source_name: str,
-        export_id: int,
+        export_id: Optional[int],
         group_device_class: Optional[str],
     ) -> None:
         super().__init__(entry, coordinator)
@@ -219,7 +224,11 @@ class WateriusExportDiagnosticSensor(_BaseWateriusEntity):
         self._source_name = (source_name or "").strip() or f"Source {source_id}"
         self._export_id = export_id
         self._group_device_class = group_device_class
-        self._attr_unique_id = f"{entry.entry_id}_source_{source_id}_export_{export_id}_diag"
+        if export_id is not None:
+            # Preserve the v1.0.x/v1.1.x unique_id when an export is already known.
+            self._attr_unique_id = f"{entry.entry_id}_source_{source_id}_export_{export_id}_diag"
+        else:
+            self._attr_unique_id = f"{entry.entry_id}_source_{source_id}_due_date_diag"
 
     @property
     def device_info(self):
@@ -232,8 +241,23 @@ class WateriusExportDiagnosticSensor(_BaseWateriusEntity):
         }
 
     def _find_export_raw(self) -> Optional[Dict[str, Any]]:
-        ex = (self._coordinator.data.exports_by_source or {}).get(self._source_id, {}).get(self._export_id)
-        return ex.raw if ex else None
+        exports = (self._coordinator.data.exports_by_source or {}).get(self._source_id, {})
+
+        # Prefer the export that was known when the entity was created. This preserves
+        # the behaviour and identifiers of older versions.
+        if self._export_id is not None:
+            ex = exports.get(self._export_id)
+            if ex:
+                return ex.raw
+
+        # If the source did not have an export during initial setup, pick the first one
+        # as soon as Waterius exposes it on a later coordinator refresh.
+        if exports:
+            first_id = sorted(exports.keys())[0]
+            ex = exports.get(first_id)
+            return ex.raw if ex else None
+
+        return None
 
     @property
     def native_value(self):

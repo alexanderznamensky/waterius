@@ -1,7 +1,7 @@
 {
   "domain": "waterius",
   "name": "Ватериус",
-  "version": "1.1.12",
+  "version": "1.1.14",
   "documentation": "https://github.com/alexanderznamensky/waterius",
   "issue_tracker": "https://github.com/alexanderznamensky/waterius/issues",
   "dependencies": [],

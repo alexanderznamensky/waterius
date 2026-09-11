@@ -7,7 +7,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN, HA_DEVICE_MANUFACTURER, HA_DEVICE_MODEL
-from . import async_send_all_configured_readings
+from . import async_synchronize_now
 
 
 async def async_setup_entry(
@@ -15,31 +15,30 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-
-    # v1.1.9 and earlier exposed a duplicate legacy button. Remove its registry
-    # entry once so it does not remain as a disabled/orphaned entity after upgrade.
+    # v1.1.13 and earlier exposed separate update/send buttons. Replace both with
+    # one explicit synchronization action so the UI matches the unified timer.
     registry = er.async_get(hass)
-    legacy_entity_id = registry.async_get_entity_id(
-        "button", DOMAIN, f"{entry.entry_id}_send_configured_reading"
-    )
-    if legacy_entity_id:
-        registry.async_remove(legacy_entity_id)
+    for old_unique_id in (
+        f"{entry.entry_id}_update_now",
+        f"{entry.entry_id}_send_all_to_waterius",
+        f"{entry.entry_id}_send_configured_reading",
+    ):
+        entity_id = registry.async_get_entity_id("button", DOMAIN, old_unique_id)
+        if entity_id:
+            registry.async_remove(entity_id)
 
-    async_add_entities(
-        [
-            WateriusUpdateNowButton(entry, coordinator),
-            WateriusSendMappedReadingsButton(hass, entry),
-        ],
-        update_before_add=False,
-    )
+    async_add_entities([WateriusSyncButton(hass, entry)], update_before_add=False)
 
 
-class _BaseWateriusButton(ButtonEntity):
+class WateriusSyncButton(ButtonEntity):
     _attr_has_entity_name = True
+    _attr_name = "Синхронизация"
+    _attr_icon = "mdi:sync"
 
-    def __init__(self, entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
         self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_sync_now"
 
     @property
     def device_info(self):
@@ -50,28 +49,5 @@ class _BaseWateriusButton(ButtonEntity):
             "model": HA_DEVICE_MODEL,
         }
 
-
-class WateriusUpdateNowButton(_BaseWateriusButton):
-    _attr_name = "Обновить данные"
-    _attr_icon = "mdi:refresh"
-
-    def __init__(self, entry: ConfigEntry, coordinator) -> None:
-        super().__init__(entry)
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{entry.entry_id}_update_now"
-
     async def async_press(self) -> None:
-        await self._coordinator.async_request_refresh()
-
-
-class WateriusSendMappedReadingsButton(_BaseWateriusButton):
-    _attr_name = "Отправить показания сейчас"
-    _attr_icon = "mdi:cloud-upload"
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        super().__init__(entry)
-        self._hass = hass
-        self._attr_unique_id = f"{entry.entry_id}_send_all_to_waterius"
-
-    async def async_press(self) -> None:
-        await async_send_all_configured_readings(self._hass, self._entry)
+        await async_synchronize_now(self._hass, self._entry)

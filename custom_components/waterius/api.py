@@ -331,26 +331,50 @@ class WateriusApi:
         """
         return await self._request_json("GET", url)
 
-    async def send_universal_payload(self, url: str, payload: Dict[str, Any]) -> Any:
-        """Send a bootstrap payload to the Universal Cloud endpoint.
+    async def send_universal_payload(
+        self,
+        url: str,
+        payload: Dict[str, Any],
+        *,
+        max_attempts: int = 3,
+        backoff_seconds: float = 2.0,
+    ) -> Any:
+        """Send readings to the Universal Cloud endpoint with transient retries.
 
-        This endpoint authenticates with the Universal-device key in the payload,
-        not with the account API token, so do not add Authorization headers here.
+        Waterius/nginx may answer 429/502/503/504 when several device keys are
+        synchronized close together. These are transient failures, so retry with
+        a short linear backoff. Other HTTP errors (especially 404 for a bad key)
+        are returned immediately.
         """
-        try:
-            async with self._session.post(
-                url,
-                json=payload,
-                headers={"Accept": "application/json, text/plain, */*"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                data = await _read_response(resp)
-                if resp.status < 200 or resp.status >= 300:
-                    raise WateriusApiError(
+        retryable_statuses = {429, 502, 503, 504}
+        attempts = max(1, int(max_attempts))
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                async with self._session.post(
+                    url,
+                    json=payload,
+                    headers={"Accept": "application/json, text/plain, */*"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    data = await _read_response(resp)
+                    if 200 <= resp.status < 300:
+                        return {"status": resp.status, "body": data, "attempt": attempt}
+
+                    error = WateriusApiError(
                         f"HTTP {resp.status} for {url}. Body: {str(data)[:2000]}"
                     )
-                return {"status": resp.status, "body": data}
-        except asyncio.TimeoutError as e:
-            raise WateriusApiError(f"Timeout calling {url}") from e
-        except aiohttp.ClientError as e:
-            raise WateriusApiError(f"Network error calling {url}: {e}") from e
+                    if resp.status not in retryable_statuses or attempt >= attempts:
+                        raise error
+                    last_error = error
+            except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+                last_error = err
+                if attempt >= attempts:
+                    if isinstance(err, asyncio.TimeoutError):
+                        raise WateriusApiError(f"Timeout calling {url}") from err
+                    raise WateriusApiError(f"Network error calling {url}: {err}") from err
+
+            await asyncio.sleep(backoff_seconds * attempt)
+
+        raise WateriusApiError(str(last_error or f"Failed calling {url}"))
