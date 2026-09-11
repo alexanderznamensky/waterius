@@ -1,6 +1,6 @@
 send_reading:
-  name: Send reading
-  description: Отправить показание по конкретному каналу (channel) на account.waterius.ru.
+  name: Отправить одно показание
+  description: Отправить значение напрямую в существующий канал Waterius по channel_id.
   fields:
     channel_id:
       name: Channel ID
@@ -13,25 +13,41 @@ send_reading:
           max: 99999999
           mode: box
     value:
-      name: Value
-      description: Показание, которое нужно отправить.
+      name: Значение
+      description: Накопительное показание счётчика.
       required: true
-      example: 162
+      example: 162.34
       selector:
         number:
           mode: box
 
 send_all:
-  name: Send all readings
-  description: Отправить текущие last_value по всем каналам, которые есть в интеграции, на account.waterius.ru.
-
-send_configured_reading:
-  name: Send configured reading
-  description: Отправить показание из выбранного sensor.* на https://uc.waterius.ru/ с параметрами из конфигуратора интеграции.
+  name: Отправить все настроенные показания
+  description: Прочитать текущие значения сопоставленных sensor.* / input_number.* Home Assistant и отправить их в Waterius.
   fields:
     entry_id:
       name: Config entry ID
       description: Необязательно. Нужно только если добавлено несколько экземпляров интеграции Waterius.
+      required: false
+      selector:
+        text:
+
+send_configured_reading:
+  name: Отправить настроенные показания
+  description: Совместимое имя старого сервиса. Отправляет все текущие сопоставленные sensor.* / input_number.* Home Assistant.
+  fields:
+    entry_id:
+      name: Config entry ID
+      required: false
+      selector:
+        text:
+
+send_all_to_waterius:
+  name: Отправить показания в Waterius
+  description: Совместимое имя старого сервиса. Отправляет все текущие сопоставленные sensor.* / input_number.* Home Assistant.
+  fields:
+    entry_id:
+      name: Config entry ID
       required: false
       selector:
         text:

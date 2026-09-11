@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import voluptuous as vol
 
@@ -10,13 +11,16 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import WateriusApi, WateriusApiError
 from .const import (
+    CHANNELS_URL,
+    CONF_METER_MAPPINGS,
+    CONF_RECONFIGURE_MAPPINGS,
     CONF_TOKEN,
-    CONF_SCAN_INTERVAL,
+    CONF_SYNC_INTERVAL,
+    DATA_TYPE_NAMES,
+    DEFAULT_SYNC_INTERVAL,
     SOURCES_URL,
-    CONF_UC_SOURCE_ENTITY,
-    CONF_UC_SEND_INTERVAL,
 )
-
+from .helpers import extract_source_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,53 +28,135 @@ _LOGGER = logging.getLogger(__name__)
 class WateriusOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._config_entry = config_entry
+        self._api: WateriusApi | None = None
+        self._base_options: dict[str, Any] = {}
+        self._sources: list[dict[str, Any]] = []
+        self._channels: list[dict[str, Any]] = []
+        self._index = 0
+        self._mappings: list[dict[str, Any]] = []
 
     def _value(self, key: str, default=None):
         return self._config_entry.options.get(key, self._config_entry.data.get(key, default))
 
-    def _schema(self) -> vol.Schema:
-        return vol.Schema(
+    def _existing_entity_for_channel(self, channel: dict[str, Any]) -> str:
+        mappings = self._value(CONF_METER_MAPPINGS, []) or []
+        channel_id = channel.get("id")
+        channel_sid = extract_source_id(channel)
+        channel_type = channel.get("data_type")
+        channel_serial = str(channel.get("serial") or "")
+
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            mapped_channel = mapping.get("channel_id")
+            if mapped_channel is not None and channel_id is not None:
+                try:
+                    if int(mapped_channel) == int(channel_id):
+                        return str(mapping.get("entity_id") or "")
+                except (TypeError, ValueError):
+                    pass
+
+            # A freshly bootstrapped Universal mapping may not yet know channel_id.
+            # Match it to the now-visible API channel by source/type/serial when possible.
+            mapped_sid = mapping.get("source_id")
+            same_source = mapped_sid is None or channel_sid is None or mapped_sid == channel_sid
+            same_type = mapping.get("data_type") == channel_type
+            mapped_serial = str(mapping.get("serial") or "")
+            same_serial = not mapped_serial or not channel_serial or mapped_serial == channel_serial
+            if same_source and same_type and same_serial:
+                return str(mapping.get("entity_id") or "")
+        return ""
+
+    async def async_step_init(self, user_input=None):
+        schema = vol.Schema(
             {
                 vol.Required(CONF_TOKEN, default=self._value(CONF_TOKEN, "")): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
-                vol.Required(CONF_SCAN_INTERVAL, default=self._value(CONF_SCAN_INTERVAL, 15)): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
-                vol.Optional(CONF_UC_SOURCE_ENTITY, default=self._value(CONF_UC_SOURCE_ENTITY, "")): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor")
-                ),
-                vol.Required(CONF_UC_SEND_INTERVAL, default=self._value(CONF_UC_SEND_INTERVAL, 1440)): vol.All(vol.Coerce(int), vol.Range(min=1, max=10080)),
+                vol.Required(
+                    CONF_SYNC_INTERVAL,
+                    default=self._value(CONF_SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
+                vol.Required(CONF_RECONFIGURE_MAPPINGS, default=False): cv.boolean,
             }
         )
-
-    async def async_step_init(self, user_input=None):
-        schema = self._schema()
-
         if user_input is None:
             return self.async_show_form(step_id="init", data_schema=schema)
 
-        data = dict(user_input)
-        for key in (CONF_TOKEN,):
-            if key in data and isinstance(data[key], str):
-                data[key] = data[key].strip()
-
-        token = str(data.get(CONF_TOKEN, "") or "").strip()
+        token = str(user_input.get(CONF_TOKEN, "") or "").strip()
         if not token:
-            return self.async_show_form(
-                step_id="init",
-                data_schema=schema,
-                errors={"base": "invalid_token"},
-            )
+            return self.async_show_form(step_id="init", data_schema=schema, errors={"base": "invalid_token"})
 
         session = async_get_clientsession(self.hass)
         api = WateriusApi(session, token)
         try:
-            await api.fetch_sources(SOURCES_URL)
+            self._sources = await api.fetch_sources(SOURCES_URL)
+            self._channels = await api.fetch_channels(CHANNELS_URL)
         except WateriusApiError as err:
             _LOGGER.error("Waterius token validation error: %s", err)
-            return self.async_show_form(
-                step_id="init",
-                data_schema=schema,
-                errors={"base": "cannot_connect"},
-            )
+            return self.async_show_form(step_id="init", data_schema=schema, errors={"base": "cannot_connect"})
 
-        return self.async_create_entry(title="", data=data)
+        self._api = api
+        self._base_options = {
+            CONF_TOKEN: token,
+            CONF_SYNC_INTERVAL: int(user_input[CONF_SYNC_INTERVAL]),
+            # Preserve previous mappings unless the user explicitly rebuilds them.
+            CONF_METER_MAPPINGS: self._value(CONF_METER_MAPPINGS, []) or [],
+        }
+
+        if not user_input.get(CONF_RECONFIGURE_MAPPINGS):
+            return self.async_create_entry(title="", data=self._base_options)
+
+        if not self._channels:
+            return self.async_show_form(step_id="init", data_schema=schema, errors={"base": "no_channels"})
+
+        self._index = 0
+        self._mappings = []
+        return await self.async_step_mapping()
+
+    async def async_step_mapping(self, user_input=None):
+        if user_input is not None:
+            channel = self._channels[self._index]
+            entity_id = str(user_input.get("entity_id", "") or "").strip()
+            if entity_id:
+                self._mappings.append(
+                    {
+                        "transport": "channel_api",
+                        "source_id": extract_source_id(channel),
+                        "channel_id": int(channel["id"]),
+                        "data_type": channel.get("data_type"),
+                        "serial": str(channel.get("serial") or ""),
+                        "entity_id": entity_id,
+                    }
+                )
+            self._index += 1
+
+        if self._index >= len(self._channels):
+            data = dict(self._base_options)
+            data[CONF_METER_MAPPINGS] = self._mappings
+            return self.async_create_entry(title="", data=data)
+
+        channel = self._channels[self._index]
+        channel_id = int(channel["id"])
+        data_type = channel.get("data_type")
+        label = DATA_TYPE_NAMES.get(data_type, f"Тип {data_type}")
+        serial = str(channel.get("serial") or "—")
+        default_entity = self._existing_entity_for_channel(channel)
+
+        field = vol.Optional("entity_id", default=default_entity) if default_entity else vol.Optional("entity_id")
+        return self.async_show_form(
+            step_id="mapping",
+            data_schema=vol.Schema(
+                {
+                    field: selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain=["sensor", "input_number"])
+                    ),
+                }
+            ),
+            description_placeholders={
+                "number": str(self._index + 1),
+                "total": str(len(self._channels)),
+                "meter": label,
+                "serial": serial,
+            },
+        )

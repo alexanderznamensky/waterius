@@ -88,12 +88,23 @@ class _BaseWateriusEntity(SensorEntity):
 
 class WateriusSummarySensor(_BaseWateriusEntity):
     _attr_has_entity_name = True
-    _attr_name = "Summary"
+    _attr_name = "Сводка"
     _attr_icon = "mdi:counter"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, entry: ConfigEntry, coordinator) -> None:
         super().__init__(entry, coordinator)
         self._attr_unique_id = f"{entry.entry_id}_summary"
+
+    @property
+    def device_info(self):
+        # Attach the integration summary to the same service device as the buttons.
+        return {
+            "identifiers": {(DOMAIN, f"entry_{self._entry.entry_id}")},
+            "name": "Waterius",
+            "manufacturer": HA_DEVICE_MANUFACTURER,
+            "model": HA_DEVICE_MODEL,
+        }
 
     @property
     def native_value(self) -> int:

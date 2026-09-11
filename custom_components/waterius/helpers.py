@@ -103,3 +103,46 @@ def compute_days_left(raw: str) -> Optional[int]:
 def parse_personal_account(title4: Any) -> str:
     s = str(title4 or "").strip()
     return s.replace("Лицевой счёт:", "").strip()
+
+
+def normalize_ha_meter_value(state: Any, data_type: int) -> tuple[float, str, bool]:
+    """Normalize a Home Assistant total sensor to Waterius' expected unit.
+
+    Returns (value, normalized_unit, converted). Raises ValueError for obvious
+    instantaneous-rate/power sensors. Unknown or empty units are left unchanged.
+    """
+    try:
+        value = float(state.state)
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"state is not numeric: {getattr(state, 'state', None)}") from err
+
+    attrs = getattr(state, "attributes", {}) or {}
+    unit_raw = str(attrs.get("unit_of_measurement") or "").strip()
+    unit = unit_raw.lower().replace(" ", "")
+
+    # Water / gas / drinking water: Universal Cloud expects cubic metres.
+    if data_type in (0, 1, 3, 9):
+        if "/" in unit or unit in ("l/min", "l/h", "m³/h", "m3/h"):
+            raise ValueError(f"instantaneous flow unit is not a meter total: {unit_raw}")
+        if unit in ("l", "liter", "litre", "литр", "литры", "л"):
+            return value / 1000.0, "m³", True
+        if unit in ("m³", "m3", ""):
+            return value, "m³" if unit else "", False
+        return value, unit_raw, False
+
+    # Electricity tariff values are energy totals in kWh, not power.
+    if data_type in (2, 5, 6, 7, 8):
+        if unit in ("w", "kw", "mw") or "/" in unit:
+            raise ValueError(f"power/rate unit is not an energy total: {unit_raw}")
+        if unit == "wh":
+            return value / 1000.0, "kWh", True
+        if unit == "mwh":
+            return value * 1000.0, "kWh", True
+        if unit in ("kwh", ""):
+            return value, "kWh" if unit else "", False
+        return value, unit_raw, False
+
+    # Heat and custom counters may use provider-specific units. Preserve them.
+    if "/" in unit:
+        raise ValueError(f"rate unit is not a cumulative meter total: {unit_raw}")
+    return value, unit_raw, False

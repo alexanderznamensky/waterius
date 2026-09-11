@@ -283,3 +283,74 @@ class WateriusApi:
     async def send_reading(self, url: str, value: Any) -> Any:
         """Send reading (value_obj) to reports endpoint."""
         return await self._request_json("POST", url, json_body={"value_obj": value})
+
+
+    async def probe_endpoint(self, method: str, url: str) -> Dict[str, Any]:
+        """Safely inspect an authenticated Waterius endpoint.
+
+        Intended for OPTIONS/HEAD-style diagnostics. It returns the HTTP status,
+        Allow header and parsed body without raising on 4xx/5xx. No secrets are
+        included in the returned structure.
+        """
+        async def _once(auth_scheme: str) -> Dict[str, Any]:
+            try:
+                async with self._session.request(
+                    method,
+                    url,
+                    headers=self._headers(auth_scheme),
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as resp:
+                    data = await _read_response(resp)
+                    return {
+                        "status": resp.status,
+                        "allow": resp.headers.get("Allow", ""),
+                        "location": resp.headers.get("Location", ""),
+                        "data": data,
+                        "auth_scheme": auth_scheme,
+                    }
+            except asyncio.TimeoutError as e:
+                raise WateriusApiError(f"Timeout calling {url}") from e
+            except aiohttp.ClientError as e:
+                raise WateriusApiError(f"Network error calling {url}: {e}") from e
+
+        result = await _once(self._auth_scheme)
+        if result["status"] in (401, 403) and self._auth_scheme == "Token":
+            retry = await _once("Bearer")
+            if retry["status"] not in (401, 403):
+                self._auth_scheme = "Bearer"
+                return retry
+        return result
+
+    async def create_universal_source(self, url: str) -> Any:
+        """Create a Universal source using the account API token.
+
+        The public Waterius instructions document this endpoint for an authenticated
+        browser session. We also try it with API-token authentication because that is
+        the only non-interactive method available to a Home Assistant integration.
+        """
+        return await self._request_json("GET", url)
+
+    async def send_universal_payload(self, url: str, payload: Dict[str, Any]) -> Any:
+        """Send a bootstrap payload to the Universal Cloud endpoint.
+
+        This endpoint authenticates with the Universal-device key in the payload,
+        not with the account API token, so do not add Authorization headers here.
+        """
+        try:
+            async with self._session.post(
+                url,
+                json=payload,
+                headers={"Accept": "application/json, text/plain, */*"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                data = await _read_response(resp)
+                if resp.status < 200 or resp.status >= 300:
+                    raise WateriusApiError(
+                        f"HTTP {resp.status} for {url}. Body: {str(data)[:2000]}"
+                    )
+                return {"status": resp.status, "body": data}
+        except asyncio.TimeoutError as e:
+            raise WateriusApiError(f"Timeout calling {url}") from e
+        except aiohttp.ClientError as e:
+            raise WateriusApiError(f"Network error calling {url}: {e}") from e

@@ -3,37 +3,146 @@
     "step": {
       "user": {
         "title": "Ватериус",
-        "description": "Сначала войдите на https://account.waterius.ru/ в браузере. Затем откройте https://account.waterius.ru/api/user/token/, скопируйте значение после строки «Ваш токен:» и вставьте его ниже. Источник sensor.* используется только как значение для отправки в УК; serial0 и data_type0 берутся из Ватериус API.",
+        "description": "Войдите по ссылке [https://account.waterius.ru/api/user/token/](https://account.waterius.ru/api/user/token/), затем вставьте токен. Интеграция сама проверит, есть ли в личном кабинете счётчики. Если аккаунта ещё нет, зарегистрируйтесь: [https://account.waterius.ru/register](https://account.waterius.ru/register).",
         "data": {
           "name": "Название",
-          "token": "Токен Ватериус",
-          "scan_interval": "Интервал обновления данных Ватериус, мин.",
-          "uc_source_entity": "Источник значения для отправки в УК (sensor.*)",
-          "uc_send_interval": "Интервал автоматической отправки в УК, мин."
+          "token": "Токен Waterius",
+          "sync_interval": "Период синхронизации с Waterius, мин."
+        },
+        "data_description": {
+          "sync_interval": "Один общий период: интеграция отправляет показания Home Assistant в Waterius и затем обновляет данные из Waterius."
         }
+      },
+      "existing_channel": {
+        "title": "Сопоставление счётчика {number} из {total}",
+        "description": "Найден Waterius: {source} → {meter}, серийный номер {serial}. Выберите накопительный sensor.* или input_number.* Home Assistant, из которого брать показание. Если этот канал не нужно отправлять из HA — оставьте поле пустым.",
+        "data": {
+          "entity_id": "Источник показания Home Assistant"
+        }
+      },
+      "meter_types": {
+        "title": "Какие счётчики добавить?",
+        "description": "В аккаунте Waterius нет каналов. Выберите типы счётчиков, которые нужно создать и связать с Home Assistant.",
+        "data": {
+          "meter_types": "Счётчики"
+        }
+      },
+      "electricity_tariff": {
+        "title": "Электросчётчик",
+        "description": "Укажите тарифность физического электросчётчика. Для двух- и трёхтарифного счётчика интеграция создаст отдельный канал для каждой тарифной зоны.",
+        "data": {
+          "electricity_tariff": "Тарифность"
+        }
+      },
+      "meter_water": {
+        "title": "Счётчики воды",
+        "description": "Укажите серийный номер каждого физического счётчика и выберите накопительный датчик Home Assistant.",
+        "data": {
+          "cold_serial": "ХВС — серийный номер",
+          "cold_entity": "ХВС — датчик Home Assistant",
+          "hot_serial": "ГВС — серийный номер",
+          "hot_entity": "ГВС — датчик Home Assistant"
+        }
+      },
+      "meter_electricity": {
+        "title": "Электроэнергия",
+        "description": "Тариф: {tariff}. Серийный номер вводится один раз для физического счётчика; каждой тарифной зоне сопоставляется свой накопительный sensor.* или input_number.*.",
+        "data": {
+          "electricity_serial": "Серийный номер электросчётчика",
+          "entity_total": "Общее — датчик Home Assistant",
+          "entity_day": "День — датчик Home Assistant",
+          "entity_night": "Ночь / T2 — датчик Home Assistant",
+          "entity_peak": "Пик / T1 — датчик Home Assistant",
+          "entity_half_peak": "Полупик / T3 — датчик Home Assistant"
+        }
+      },
+      "meter_gas": {
+        "title": "Газ",
+        "description": "Укажите серийный номер и накопительный датчик Home Assistant для счётчика газа.",
+        "data": {
+          "serial": "Серийный номер",
+          "entity_id": "Датчик Home Assistant"
+        }
+      },
+      "meter_heat": {
+        "title": "Отопление / тепло",
+        "description": "Укажите серийный номер и накопительный датчик Home Assistant.",
+        "data": {
+          "serial": "Серийный номер",
+          "entity_id": "Датчик Home Assistant"
+        }
+      },
+      "meter_drinking_water": {
+        "title": "Питьевая вода",
+        "description": "Укажите серийный номер и накопительный датчик Home Assistant.",
+        "data": {
+          "serial": "Серийный номер",
+          "entity_id": "Датчик Home Assistant"
+        }
+      },
+      "meter_other": {
+        "title": "Другой счётчик",
+        "description": "Укажите серийный номер и накопительный датчик Home Assistant.",
+        "data": {
+          "serial": "Серийный номер",
+          "entity_id": "Датчик Home Assistant"
+        }
+      },
+      "review": {
+        "title": "Проверка источников",
+        "description": "Проверьте текущие значения перед созданием счётчиков Waterius:\n\n{summary}\n\nДолжны быть выбраны накопительные показания, а не мгновенный расход/мощность.",
+        "data": {
+          "confirm": "Всё верно, продолжить"
+        }
+      },
+      "universal_key": {
+        "title": "Создание устройства Waterius: {meter}",
+        "description": "Откройте {url} в браузере, где вы авторизованы в Waterius. Нажмите «Создать устройство». Waterius сразу покажет уникальный key — скопируйте его и вставьте ниже. Для КАЖДОЙ следующей группы мастер попросит создать НОВОЕ устройство и использовать новый key. После первой отправки интеграция проверит, что счётчики действительно появились.",
+        "data": {
+          "universal_key": "Уникальный key устройства Home Assistant"
+        }
+      },
+      "bootstrap_verify": {
+        "title": "Ожидание Waterius: {meter}",
+        "description": "Waterius принял показания, но API кабинета пока не показывает все параметры счётчиков. Интеграция уже повторила тот же запрос тем же key автоматически. Не создавайте новое устройство и не меняйте key. Нажмите «Подтвердить», чтобы ещё раз отправить те же текущие показания тем же key и до 30 секунд проверять результат. Повторная передача накопительных показаний не создаёт новое устройство.\\n\\nДиагностика:\\n{details}"
       }
     },
     "error": {
       "invalid_token": "Токен не должен быть пустым",
-      "cannot_connect": "Не удалось проверить токен Ватериус. Сначала войдите на https://account.waterius.ru/, затем откройте https://account.waterius.ru/api/user/token/ и скопируйте токен."
+      "cannot_connect": "Не удалось подключиться к API Waterius или проверить токен",
+      "select_meter": "Выберите хотя бы один счётчик",
+      "invalid_source_sensor": "Один или несколько датчиков недоступны или не содержат числового значения",
+      "bootstrap_failed": "Не удалось отправить первое показание в Waterius",
+      "invalid_universal_key": "Введите key, показанный Waterius после создания устройства Home Assistant",
+      "duplicate_universal_key": "Этот key уже использован для предыдущей группы. Создайте новое устройство Home Assistant в Waterius и вставьте его новый key"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Настройки Ватериус",
-        "description": "Для обновления token сначала войдите на https://account.waterius.ru/, затем откройте https://account.waterius.ru/api/user/token/ и скопируйте значение после «Ваш токен:». Источник sensor.* используется только как значение для отправки в УК; остальные данные берутся из Ватериус API.",
+        "title": "Настройки Waterius",
+        "description": "Можно изменить интервалы и токен. Включите перенастройку сопоставлений, чтобы заново выбрать sensor.* или input_number.* Home Assistant для уже существующих каналов Waterius.",
         "data": {
-          "token": "Токен Ватериус",
-          "scan_interval": "Интервал обновления данных Ватериус, мин.",
-          "uc_source_entity": "Источник значения для отправки в УК (sensor.*)",
-          "uc_send_interval": "Интервал автоматической отправки в УК, мин."
+          "token": "Токен Waterius",
+          "reconfigure_mappings": "Перенастроить сопоставления датчиков",
+          "sync_interval": "Период синхронизации с Waterius, мин."
+        },
+        "data_description": {
+          "sync_interval": "Один общий период для отправки показаний и получения обновлённых данных Waterius."
+        }
+      },
+      "mapping": {
+        "title": "Сопоставление {number} из {total}",
+        "description": "Waterius: {meter}, серийный номер {serial}. Выберите накопительный sensor.* или input_number.* Home Assistant или оставьте пустым, чтобы не отправлять этот канал из HA.",
+        "data": {
+          "entity_id": "Источник показания Home Assistant"
         }
       }
     },
     "error": {
       "invalid_token": "Токен не должен быть пустым",
-      "cannot_connect": "Не удалось проверить токен Ватериус"
+      "cannot_connect": "Не удалось подключиться к API Waterius",
+      "no_channels": "В Waterius пока нет каналов. Для создания счётчиков удалите и добавьте интеграцию заново, чтобы запустить мастер первоначальной настройки"
     }
   }
 }

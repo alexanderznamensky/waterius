@@ -40,7 +40,7 @@ class WateriusData:
 
 
 class WateriusCoordinator(DataUpdateCoordinator[WateriusData]):
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, api: WateriusApi, update_interval: timedelta) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, api: WateriusApi, update_interval: timedelta | None) -> None:
         super().__init__(
             hass,
             logger=__import__("logging").getLogger(__name__),
