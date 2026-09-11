@@ -67,6 +67,38 @@ class WateriusOptionsFlowHandler(config_entries.OptionsFlow):
                 return str(mapping.get("entity_id") or "")
         return ""
 
+    @staticmethod
+    def _mapping_matches_channel(mapping: dict[str, Any], channel: dict[str, Any]) -> bool:
+        mapped_channel = mapping.get("channel_id")
+        channel_id = channel.get("id")
+        if mapped_channel is not None and channel_id is not None:
+            try:
+                if int(mapped_channel) == int(channel_id):
+                    return True
+            except (TypeError, ValueError):
+                pass
+
+        mapped_sid = mapping.get("source_id")
+        channel_sid = extract_source_id(channel)
+        same_source = mapped_sid is None or channel_sid is None or str(mapped_sid) == str(channel_sid)
+        same_type = mapping.get("data_type") == channel.get("data_type")
+        mapped_serial = str(mapping.get("serial") or "").strip()
+        channel_serial = str(channel.get("serial") or "").strip()
+        same_serial = not mapped_serial or not channel_serial or mapped_serial == channel_serial
+        return same_source and same_type and same_serial
+
+    def _original_universal_mapping(self, channel: dict[str, Any]) -> dict[str, Any] | None:
+        """Recover original Universal metadata even after an older Options rewrite."""
+        original = self._config_entry.data.get(CONF_METER_MAPPINGS, []) or []
+        for mapping in original:
+            if not isinstance(mapping, dict):
+                continue
+            if mapping.get("transport") != "universal" or not mapping.get("uc_key"):
+                continue
+            if self._mapping_matches_channel(mapping, channel):
+                return mapping
+        return None
+
     async def async_step_init(self, user_input=None):
         schema = vol.Schema(
             {
@@ -119,16 +151,26 @@ class WateriusOptionsFlowHandler(config_entries.OptionsFlow):
             channel = self._channels[self._index]
             entity_id = str(user_input.get("entity_id", "") or "").strip()
             if entity_id:
-                self._mappings.append(
-                    {
-                        "transport": "channel_api",
-                        "source_id": extract_source_id(channel),
-                        "channel_id": int(channel["id"]),
-                        "data_type": channel.get("data_type"),
-                        "serial": str(channel.get("serial") or ""),
-                        "entity_id": entity_id,
-                    }
-                )
+                mapping = {
+                    "transport": "channel_api",
+                    "source_id": extract_source_id(channel),
+                    "channel_id": int(channel["id"]),
+                    "data_type": channel.get("data_type"),
+                    "serial": str(channel.get("serial") or ""),
+                    "entity_id": entity_id,
+                }
+
+                # A Universal device must continue to be sent through uc.waterius.ru.
+                # Up to 1.1.15 the reconfiguration wizard accidentally replaced that
+                # transport with channel_api and discarded key/channel-position metadata.
+                # Recover it from ConfigEntry.data, which still holds the original setup.
+                original = self._original_universal_mapping(channel)
+                if original is not None:
+                    for key in ("transport", "group_id", "group_name", "uc_key", "uc_channel"):
+                        if key in original:
+                            mapping[key] = original[key]
+
+                self._mappings.append(mapping)
             self._index += 1
 
         if self._index >= len(self._channels):

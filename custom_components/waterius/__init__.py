@@ -82,14 +82,24 @@ def _get_numeric_state(hass: HomeAssistant, entity_id: str, data_type: int | Non
 
 
 def _get_safe_routine_value(
-    hass: HomeAssistant, entity_id: str, data_type: int | None = None
+    hass: HomeAssistant,
+    entity_id: str,
+    data_type: int | None = None,
+    *,
+    current_waterius_value: float | None = None,
 ) -> float | None:
     """Return a safe cumulative value for routine synchronization.
 
-    Routine sends deliberately skip missing/unavailable/non-numeric values and
-    zero/negative totals. A default input_number often starts at 0, and sending
-    that automatically could overwrite a valid meter total in Waterius. Bootstrap
-    uses a different path and may still send 0 to create brand-new channels.
+    Unchanged values are intentionally NOT filtered out: every synchronization must
+    transmit the current total so Waterius can refresh its last-received timestamp.
+
+    Missing/unavailable/non-numeric values and negative totals are skipped. Any
+    positive HA value is sent even when it is lower than the current Waterius value:
+    a meter can legitimately be replaced/reset and HA remains the source of truth.
+
+    Zero is the only protected value. It is sent only when Waterius already contains
+    zero for that channel; otherwise it is skipped so a default/failed HA sensor cannot
+    accidentally overwrite a real non-zero meter total.
     """
     state = hass.states.get(entity_id)
     if state is None or state.state in ("", "unknown", "unavailable"):
@@ -103,15 +113,124 @@ def _get_safe_routine_value(
     except (TypeError, ValueError) as err:
         _LOGGER.warning("Waterius: skip %s because it is not a valid cumulative value: %s", entity_id, err)
         return None
-    if value <= 0:
-        _LOGGER.warning("Waterius: skip %s because cumulative value is %s (<= 0)", entity_id, value)
+
+    if value < 0:
+        _LOGGER.warning("Waterius: skip %s because cumulative value is negative: %s", entity_id, value)
         return None
+
+    if value == 0:
+        try:
+            current = float(current_waterius_value) if current_waterius_value is not None else None
+        except (TypeError, ValueError):
+            current = None
+        if current != 0:
+            _LOGGER.warning(
+                "Waterius: skip %s because HA value is 0 while current Waterius value is %s",
+                entity_id, current_waterius_value,
+            )
+            return None
+
     return value
 
 
+def _current_waterius_value(coordinator, mapping: dict[str, Any]) -> float | None:
+    """Resolve current Waterius total for a configured mapping, if available."""
+    channel_id = mapping.get("channel_id")
+    source_id = mapping.get("source_id")
+    pools = []
+    if source_id is not None:
+        try:
+            pools.append(coordinator.data.channels_by_source.get(int(source_id), []))
+        except (TypeError, ValueError):
+            pass
+    if not pools:
+        pools = list((coordinator.data.channels_by_source or {}).values())
+
+    if channel_id is not None:
+        try:
+            wanted = int(channel_id)
+        except (TypeError, ValueError):
+            wanted = None
+        if wanted is not None:
+            for channels in pools:
+                for channel in channels:
+                    if channel.channel_id == wanted:
+                        try:
+                            return float(channel.last_value)
+                        except (TypeError, ValueError):
+                            return None
+
+    # Fallback for migrated/bootstrap mappings where channel_id may be temporarily absent.
+    data_type = mapping.get("data_type")
+    serial = str(mapping.get("serial") or "").strip()
+    for channels in pools:
+        for channel in channels:
+            raw = channel.raw or {}
+            if raw.get("data_type") != data_type:
+                continue
+            ch_serial = str(raw.get("serial") or "").strip()
+            if serial and ch_serial and serial != ch_serial:
+                continue
+            try:
+                return float(channel.last_value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _mapping_matches(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Return True when two stored mappings describe the same Waterius channel."""
+    a_channel = a.get("channel_id")
+    b_channel = b.get("channel_id")
+    if a_channel is not None and b_channel is not None:
+        try:
+            if int(a_channel) == int(b_channel):
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    a_source = a.get("source_id")
+    b_source = b.get("source_id")
+    same_source = a_source is None or b_source is None or str(a_source) == str(b_source)
+    same_type = a.get("data_type") == b.get("data_type")
+    a_serial = str(a.get("serial") or "").strip()
+    b_serial = str(b.get("serial") or "").strip()
+    same_serial = not a_serial or not b_serial or a_serial == b_serial
+    return same_source and same_type and same_serial
+
+
 def _configured_mappings(entry: ConfigEntry) -> list[dict[str, Any]]:
+    """Return effective mappings and recover Universal metadata if Options lost it.
+
+    Versions up to 1.1.15 rebuilt mappings in Options as ``channel_api`` even for
+    devices originally bootstrapped through uc.waterius.ru. ConfigEntry.data still
+    contains the original Universal mappings, including their key. Merge that transport
+    metadata back while keeping the currently selected HA entity_id from Options.
+    """
     raw = _entry_value(entry, CONF_METER_MAPPINGS, []) or []
-    return [x for x in raw if isinstance(x, dict) and x.get("entity_id")]
+    mappings = [dict(x) for x in raw if isinstance(x, dict) and x.get("entity_id")]
+
+    original_raw = entry.data.get(CONF_METER_MAPPINGS, []) or []
+    original_universal = [
+        x for x in original_raw
+        if isinstance(x, dict) and x.get("transport") == "universal" and x.get("uc_key")
+    ]
+
+    for mapping in mappings:
+        if mapping.get("transport") == "universal" and mapping.get("uc_key"):
+            continue
+        original = next((x for x in original_universal if _mapping_matches(mapping, x)), None)
+        if original is None:
+            continue
+        for key in ("transport", "group_id", "group_name", "uc_key", "uc_channel"):
+            if key in original:
+                mapping[key] = original[key]
+        _LOGGER.debug(
+            "Waterius: recovered Universal transport for channel=%s source=%s entity=%s",
+            mapping.get("channel_id"), mapping.get("source_id"), mapping.get("entity_id"),
+        )
+
+    return mappings
 
 
 def _is_sending_configured(entry: ConfigEntry) -> bool:
@@ -176,9 +295,10 @@ def _find_legacy_channel_by_entity(hass: HomeAssistant, entry: ConfigEntry, coor
 async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigEntry) -> int:
     """Send safe current Home Assistant totals according to configured mappings.
 
-    Invalid/unavailable/zero routine values are skipped rather than sent. For a
-    Universal device all channels in that device must be valid; otherwise the whole
-    device is skipped to preserve ch0..ch3 positional mapping.
+    Unchanged values are sent on every synchronization. Invalid/unavailable values
+    and cumulative rollbacks are skipped. A zero is sent when Waterius also has zero.
+    For a Universal device all channels in that device must be safe; otherwise the
+    whole device is skipped to preserve ch0..ch3 positional mapping.
     """
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
     coordinator = runtime.get("coordinator")
@@ -192,7 +312,13 @@ async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigE
         if not legacy_entity:
             return 0
         channel = _find_legacy_channel_by_entity(hass, entry, coordinator, legacy_entity)
-        value = _get_safe_routine_value(hass, legacy_entity)
+        try:
+            current_legacy = float(channel.last_value)
+        except (TypeError, ValueError):
+            current_legacy = None
+        value = _get_safe_routine_value(
+            hass, legacy_entity, current_waterius_value=current_legacy
+        )
         if value is None:
             return 0
         url = CHANNEL_SEND_URL_TEMPLATE.format(channel_id=channel.channel_id)
@@ -212,7 +338,10 @@ async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigE
             _LOGGER.warning("Waterius mapping has no channel_id and will be skipped: %s", mapping)
             continue
         value = _get_safe_routine_value(
-            hass, str(mapping["entity_id"]), mapping.get("data_type")
+            hass,
+            str(mapping["entity_id"]),
+            mapping.get("data_type"),
+            current_waterius_value=_current_waterius_value(coordinator, mapping),
         )
         if value is None:
             continue
@@ -222,6 +351,10 @@ async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigE
         except WateriusApiError as err:
             _LOGGER.error("Failed to send Waterius channel %s: %s", channel_id, err)
             continue
+        _LOGGER.info(
+            "Waterius synchronization sent channel %s from %s: value=%s",
+            channel_id, mapping.get("entity_id"), value,
+        )
         sent += 1
 
     # Universal sources use one request per device key. Never send a sparse device:
@@ -260,7 +393,12 @@ async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigE
         invalid_entities: list[str] = []
         for mapping in group_mappings:
             entity_id = str(mapping["entity_id"])
-            value = _get_safe_routine_value(hass, entity_id, int(mapping["data_type"]))
+            value = _get_safe_routine_value(
+                hass,
+                entity_id,
+                int(mapping["data_type"]),
+                current_waterius_value=_current_waterius_value(coordinator, mapping),
+            )
             if value is None:
                 invalid_entities.append(entity_id)
             else:
@@ -287,10 +425,16 @@ async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigE
         if group_number > 0:
             await asyncio.sleep(2)
         try:
-            await api.send_universal_payload(UC_SEND_URL, payload)
+            response = await api.send_universal_payload(UC_SEND_URL, payload)
         except WateriusApiError as err:
             _LOGGER.error("Failed to send Universal Waterius device %s: %s", group_name, err)
             continue
+        _LOGGER.info(
+            "Waterius synchronization sent device %s: values=%s response=%s",
+            group_name,
+            {f"ch{int(m.get('uc_channel', 0))}": v for m, v in prepared},
+            response,
+        )
         sent += len(prepared)
 
     # Always refresh even when all source readings were skipped. This keeps the HA

@@ -119,10 +119,15 @@ class WateriusSummarySensor(_BaseWateriusEntity):
     def extra_state_attributes(self) -> Dict[str, Any]:
         channels_total = sum(len(v) for v in (self._coordinator.data.channels_by_source or {}).values())
         exports_total = sum(len(v) for v in (self._coordinator.data.exports_by_source or {}).values())
+        last_wakeups = []
+        for source in (self._coordinator.data.sources or {}).values():
+            if isinstance(source, dict) and source.get("last_wakeup"):
+                last_wakeups.append(str(source.get("last_wakeup")))
         return {
             "sources_count": len(self._coordinator.data.sources or {}),
             "channels_count": channels_total,
             "exports_count": exports_total,
+            "Последняя передача в Ватериус": max(last_wakeups) if last_wakeups else None,
         }
 
 
