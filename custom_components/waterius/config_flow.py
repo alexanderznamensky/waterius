@@ -151,9 +151,13 @@ class WateriusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 sid = extract_source_id(channel)
                 self._mappings.append(
                     {
-                        "transport": "channel_api",
+                        # Current Waterius channel reports endpoint is read-only for POST.
+                        # Existing devices are synchronized through uc.waterius.ru too.
+                        "transport": "universal",
                         "source_id": sid,
                         "channel_id": int(channel["id"]),
+                        "uc_channel": int(channel.get("number", 0) or 0),
+                        "group_id": f"source_{sid}",
                         "data_type": channel.get("data_type"),
                         "serial": str(channel.get("serial") or ""),
                         "entity_id": entity_id,

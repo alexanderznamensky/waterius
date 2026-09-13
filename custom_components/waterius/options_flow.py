@@ -151,10 +151,15 @@ class WateriusOptionsFlowHandler(config_entries.OptionsFlow):
             channel = self._channels[self._index]
             entity_id = str(user_input.get("entity_id", "") or "").strip()
             if entity_id:
+                source_id = extract_source_id(channel)
                 mapping = {
-                    "transport": "channel_api",
-                    "source_id": extract_source_id(channel),
+                    # All current Waterius devices are sent through Universal Cloud.
+                    # /api/channel/<id>/reports/ is GET-only and returns 405 to POST.
+                    "transport": "universal",
+                    "source_id": source_id,
                     "channel_id": int(channel["id"]),
+                    "uc_channel": int(channel.get("number", 0) or 0),
+                    "group_id": f"source_{source_id}",
                     "data_type": channel.get("data_type"),
                     "serial": str(channel.get("serial") or ""),
                     "entity_id": entity_id,

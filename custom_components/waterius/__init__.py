@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import asyncio
+import re
 from datetime import timedelta
 import logging
 from typing import Any
@@ -292,13 +293,176 @@ def _find_legacy_channel_by_entity(hass: HomeAssistant, entry: ConfigEntry, coor
     )
 
 
-async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigEntry) -> int:
-    """Send safe current Home Assistant totals according to configured mappings.
+def _resolve_mapping_source_id(coordinator, mapping: dict[str, Any]) -> int | None:
+    """Resolve the Waterius source that owns a mapping."""
+    raw_source_id = mapping.get("source_id")
+    if raw_source_id is not None:
+        try:
+            source_id = int(raw_source_id)
+            if source_id in (coordinator.data.sources or {}) or source_id in (coordinator.data.channels_by_source or {}):
+                return source_id
+        except (TypeError, ValueError):
+            pass
 
-    Unchanged values are sent on every synchronization. Invalid/unavailable values
-    and cumulative rollbacks are skipped. A zero is sent when Waterius also has zero.
-    For a Universal device all channels in that device must be safe; otherwise the
-    whole device is skipped to preserve ch0..ch3 positional mapping.
+    channel_id = mapping.get("channel_id")
+    if channel_id is not None:
+        try:
+            wanted_channel = int(channel_id)
+        except (TypeError, ValueError):
+            wanted_channel = None
+        if wanted_channel is not None:
+            for source_id, channels in (coordinator.data.channels_by_source or {}).items():
+                if any(channel.channel_id == wanted_channel for channel in channels):
+                    return int(source_id)
+
+    # Last-resort match for old/bootstrap mappings that have no channel_id yet.
+    wanted_type = mapping.get("data_type")
+    wanted_serial = str(mapping.get("serial") or "").strip()
+    candidates: list[int] = []
+    for source_id, channels in (coordinator.data.channels_by_source or {}).items():
+        for channel in channels:
+            raw = channel.raw or {}
+            if raw.get("data_type") != wanted_type:
+                continue
+            serial = str(raw.get("serial") or "").strip()
+            if wanted_serial and serial and wanted_serial != serial:
+                continue
+            candidates.append(int(source_id))
+            break
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _looks_like_universal_key(value: str) -> bool:
+    value = str(value or "").strip()
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]{16,256}", value))
+
+
+def _extract_source_universal_key(
+    source: dict[str, Any] | None,
+    mappings: list[dict[str, Any]],
+) -> str:
+    """Return the full uc.waterius.ru device key without depending on display name.
+
+    New entries store ``uc_key`` in their mapping. Older Waterius devices expose the
+    full unique token inside ``device_info``; their ``name`` initially equals the key
+    but may later be changed by the ``name`` field of a Universal payload, so it is
+    only a fallback when it still looks like a long token.
+    """
+    for mapping in mappings:
+        key = str(mapping.get("uc_key") or "").strip()
+        if key:
+            return key
+
+    source = source if isinstance(source, dict) else {}
+    for field in ("uc_key", "universal_key", "send_key", "api_key"):
+        key = str(source.get(field) or "").strip()
+        if key:
+            return key
+
+    device_info = str(source.get("device_info") or "")
+    patterns = (
+        r"Уникальный\s+токен\s*:\s*([A-Za-z0-9._-]{16,256})",
+        r"Unique\s+token\s*:\s*([A-Za-z0-9._-]{16,256})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, device_info, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    # A newly-created Waterius Home Assistant device initially uses the full key as
+    # its display name. Never use short source["key"] values (often only 4 digits).
+    name = str(source.get("name") or "").strip()
+    if _looks_like_universal_key(name):
+        return name
+
+    long_key = str(source.get("key") or "").strip()
+    if _looks_like_universal_key(long_key):
+        return long_key
+    return ""
+
+
+def _source_group_name(source: dict[str, Any] | None, channels: list[Any]) -> str:
+    """Choose a stable, human-readable Waterius device name."""
+    source = source if isinstance(source, dict) else {}
+    existing_name = str(source.get("name") or "").strip()
+    if existing_name and not _looks_like_universal_key(existing_name) and set(existing_name) != {"?"}:
+        return existing_name
+
+    data_types = {channel.raw.get("data_type") for channel in channels if channel and channel.raw}
+    if data_types and data_types.issubset({0, 1}):
+        return "Вода"
+    if data_types and data_types.issubset({2, 5, 6, 7, 8}):
+        return "Электроэнергия"
+    if data_types == {3}:
+        return "Газ"
+    if data_types == {4}:
+        return "Отопление"
+    if data_types == {9}:
+        return "Питьевая вода"
+    return "Home Assistant"
+
+
+def _channel_number(channel: Any, fallback: int) -> int:
+    try:
+        return int((channel.raw or {}).get("number", fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _current_channel_number_value(channel: Any) -> float | None:
+    try:
+        return float(channel.last_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mapping_for_channel(
+    mappings: list[dict[str, Any]],
+    source_id: int,
+    channel: Any,
+) -> dict[str, Any] | None:
+    """Find the HA source mapping corresponding to a Waterius channel."""
+    channel_id = channel.channel_id
+    raw = channel.raw or {}
+    data_type = raw.get("data_type")
+    serial = str(raw.get("serial") or "").strip()
+    for mapping in mappings:
+        mapped_source = mapping.get("source_id")
+        if mapped_source is not None:
+            try:
+                if int(mapped_source) != int(source_id):
+                    continue
+            except (TypeError, ValueError):
+                continue
+
+        mapped_channel = mapping.get("channel_id")
+        if mapped_channel is not None:
+            try:
+                if int(mapped_channel) == int(channel_id):
+                    return mapping
+            except (TypeError, ValueError):
+                pass
+
+        if mapping.get("data_type") != data_type:
+            continue
+        mapped_serial = str(mapping.get("serial") or "").strip()
+        if mapped_serial and serial and mapped_serial != serial:
+            continue
+        return mapping
+    return None
+
+
+async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigEntry) -> int:
+    """Send mapped HA readings to Waterius through Universal Cloud.
+
+    ``/api/channel/<id>/reports/`` is read-only on the current Waterius API (POST
+    returns 405), therefore routine synchronization must never use ``channel_api``.
+    Existing and newly-created Waterius devices are both sent to ``uc.waterius.ru``.
+
+    Each request contains the complete source device. Mapped channels take their
+    current HA value; unmapped/temporarily-invalid channels keep their current
+    Waterius value. This prevents a bad sensor from overwriting a valid total while
+    still allowing the other channels and the device last-wakeup timestamp to update.
     """
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
     coordinator = runtime.get("coordinator")
@@ -307,140 +471,137 @@ async def async_send_all_configured_readings(hass: HomeAssistant, entry: ConfigE
         raise HomeAssistantError("No active Waterius coordinator found")
 
     mappings = _configured_mappings(entry)
+
+    # Convert the old single-source option into an in-memory mapping so old config
+    # entries also use the supported Universal endpoint.
     if not mappings:
         legacy_entity = str(_entry_value(entry, CONF_UC_SOURCE_ENTITY, "") or "").strip()
-        if not legacy_entity:
+        if legacy_entity:
+            channel = _find_legacy_channel_by_entity(hass, entry, coordinator, legacy_entity)
+            raw = channel.raw or {}
+            mappings = [{
+                "source_id": raw.get("source"),
+                "channel_id": channel.channel_id,
+                "data_type": raw.get("data_type"),
+                "serial": str(raw.get("serial") or ""),
+                "entity_id": legacy_entity,
+            }]
+        else:
+            await coordinator.async_request_refresh()
             return 0
-        channel = _find_legacy_channel_by_entity(hass, entry, coordinator, legacy_entity)
-        try:
-            current_legacy = float(channel.last_value)
-        except (TypeError, ValueError):
-            current_legacy = None
-        value = _get_safe_routine_value(
-            hass, legacy_entity, current_waterius_value=current_legacy
-        )
-        if value is None:
-            return 0
-        url = CHANNEL_SEND_URL_TEMPLATE.format(channel_id=channel.channel_id)
-        await api.send_reading(url, value)
-        await coordinator.async_request_refresh()
-        return 1
 
-    sent = 0
-
-    # Existing Waterius channels can be updated independently. Bad source values
-    # only skip that one channel and do not block the rest.
+    mappings_by_source: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    unresolved: list[str] = []
     for mapping in mappings:
-        if mapping.get("transport") != "channel_api":
+        source_id = _resolve_mapping_source_id(coordinator, mapping)
+        if source_id is None:
+            unresolved.append(str(mapping.get("entity_id") or mapping.get("channel_id") or "?"))
             continue
-        channel_id = mapping.get("channel_id")
-        if not channel_id:
-            _LOGGER.warning("Waterius mapping has no channel_id and will be skipped: %s", mapping)
-            continue
-        value = _get_safe_routine_value(
-            hass,
-            str(mapping["entity_id"]),
-            mapping.get("data_type"),
-            current_waterius_value=_current_waterius_value(coordinator, mapping),
-        )
-        if value is None:
-            continue
-        url = CHANNEL_SEND_URL_TEMPLATE.format(channel_id=int(channel_id))
-        try:
-            await api.send_reading(url, value)
-        except WateriusApiError as err:
-            _LOGGER.error("Failed to send Waterius channel %s: %s", channel_id, err)
-            continue
-        _LOGGER.info(
-            "Waterius synchronization sent channel %s from %s: value=%s",
-            channel_id, mapping.get("entity_id"), value,
-        )
-        sent += 1
+        effective = dict(mapping)
+        effective["source_id"] = source_id
+        mappings_by_source[source_id].append(effective)
 
-    # Universal sources use one request per device key. Never send a sparse device:
-    # Waterius maps values by ch0..ch3 position, so if any channel is invalid we skip
-    # the whole group until all cumulative totals are available.
-    universal_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for mapping in mappings:
-        if mapping.get("transport") == "universal":
-            universal_groups[str(mapping.get("group_id") or mapping.get("uc_key") or "default")].append(mapping)
+    if unresolved:
+        _LOGGER.warning("Waterius: could not resolve source for mappings: %s", ", ".join(unresolved))
 
-    for group_number, group_mappings in enumerate(universal_groups.values()):
-        group_mappings.sort(key=lambda item: int(item.get("uc_channel", 0)))
-        key = str(group_mappings[0].get("uc_key") or "").strip()
+    sent_from_ha = 0
+    posted_devices = 0
+
+    for source_id, source_mappings in mappings_by_source.items():
+        channels = list((coordinator.data.channels_by_source or {}).get(source_id, []))
+        if not channels:
+            _LOGGER.warning("Waterius: source %s has no channels; synchronization skipped", source_id)
+            continue
+
+        source = (coordinator.data.sources or {}).get(source_id)
+        key = _extract_source_universal_key(source, source_mappings)
         if not key:
-            _LOGGER.error("Universal Waterius mapping has no device key; group skipped")
-            continue
-
-        first_mapping = group_mappings[0]
-        group_name = str(first_mapping.get("group_name") or "").strip()
-        if not group_name:
-            first_type = int(first_mapping.get("data_type", 10))
-            if first_type in (0, 1):
-                group_name = "Вода"
-            elif first_type in (2, 5, 6, 7, 8):
-                group_name = "Электроэнергия"
-            elif first_type == 3:
-                group_name = "Газ"
-            elif first_type == 4:
-                group_name = "Отопление"
-            elif first_type == 9:
-                group_name = "Питьевая вода"
-            else:
-                group_name = "Home Assistant"
-
-        prepared: list[tuple[dict[str, Any], float]] = []
-        invalid_entities: list[str] = []
-        for mapping in group_mappings:
-            entity_id = str(mapping["entity_id"])
-            value = _get_safe_routine_value(
-                hass,
-                entity_id,
-                int(mapping["data_type"]),
-                current_waterius_value=_current_waterius_value(coordinator, mapping),
-            )
-            if value is None:
-                invalid_entities.append(entity_id)
-            else:
-                prepared.append((mapping, value))
-
-        if invalid_entities:
-            _LOGGER.warning(
-                "Waterius: skip Universal device %s because not all channels are ready: %s",
-                group_name, ", ".join(invalid_entities),
+            _LOGGER.error(
+                "Waterius: cannot determine Universal key for source %s. "
+                "Reconfigure the mapping or recreate the integration entry.",
+                source_id,
             )
             continue
 
+        group_name = _source_group_name(source, channels)
         payload: dict[str, Any] = {"key": key, "name": group_name}
-        for mapping, value in prepared:
-            index = int(mapping.get("uc_channel", 0))
+        payload_values: dict[str, float] = {}
+        missing_values: list[str] = []
+        ha_values_used = 0
+
+        sorted_channels = sorted(
+            channels,
+            key=lambda ch: (_channel_number(ch, 999), ch.channel_id),
+        )
+        for fallback_index, channel in enumerate(sorted_channels):
+            raw = channel.raw or {}
+            index = _channel_number(channel, fallback_index)
+            mapping = _mapping_for_channel(source_mappings, source_id, channel)
+            current = _current_channel_number_value(channel)
+            value: float | None = current
+
+            if mapping is not None:
+                candidate = _get_safe_routine_value(
+                    hass,
+                    str(mapping["entity_id"]),
+                    raw.get("data_type"),
+                    current_waterius_value=current,
+                )
+                if candidate is not None:
+                    value = candidate
+                    ha_values_used += 1
+                elif current is not None:
+                    _LOGGER.warning(
+                        "Waterius: preserving current value %s for source=%s channel=%s "
+                        "because HA entity %s is not safe to send",
+                        current, source_id, channel.channel_id, mapping.get("entity_id"),
+                    )
+
+            if value is None:
+                missing_values.append(str(channel.channel_id))
+                continue
+
             payload[f"ch{index}"] = value
-            payload[f"data_type{index}"] = int(mapping["data_type"])
-            serial = str(mapping.get("serial") or "").strip()
+            payload[f"data_type{index}"] = int(raw.get("data_type", 10))
+            serial = str(raw.get("serial") or "").strip()
             if serial:
                 payload[f"serial{index}"] = serial
+            payload_values[f"ch{index}"] = value
 
-        # Avoid bursting two Universal device keys back-to-back. Waterius/nginx
-        # can answer 503 under a burst; send_universal_payload also retries 503.
-        if group_number > 0:
+        if missing_values:
+            _LOGGER.error(
+                "Waterius: source %s (%s) has channels without any safe value: %s; device skipped",
+                source_id, group_name, ", ".join(missing_values),
+            )
+            continue
+
+        if posted_devices > 0:
             await asyncio.sleep(2)
         try:
             response = await api.send_universal_payload(UC_SEND_URL, payload)
         except WateriusApiError as err:
-            _LOGGER.error("Failed to send Universal Waterius device %s: %s", group_name, err)
+            _LOGGER.error(
+                "Failed to send Universal Waterius source %s (%s): %s",
+                source_id, group_name, err,
+            )
             continue
+
+        posted_devices += 1
+        sent_from_ha += ha_values_used
         _LOGGER.info(
-            "Waterius synchronization sent device %s: values=%s response=%s",
+            "Waterius synchronization sent source=%s device=%s HA=%s/%s values=%s response=%s",
+            source_id,
             group_name,
-            {f"ch{int(m.get('uc_channel', 0))}": v for m, v in prepared},
+            ha_values_used,
+            len(source_mappings),
+            payload_values,
             response,
         )
-        sent += len(prepared)
 
-    # Always refresh even when all source readings were skipped. This keeps the HA
-    # representation current and makes manual synchronization useful without mappings.
+    # Refresh the account API after all Universal POSTs so sensors and last_wakeup
+    # reflect exactly what Waterius accepted.
     await coordinator.async_request_refresh()
-    return sent
+    return sent_from_ha
 
 
 async def async_synchronize_now(hass: HomeAssistant, entry: ConfigEntry) -> int:
@@ -475,17 +636,41 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     async def handle_send_reading(call: ServiceCall) -> None:
+        """Send one explicit channel value by posting the complete Universal device."""
         channel_id = int(call.data["channel_id"])
-        value = call.data["value"]
+        requested_value = float(call.data["value"])
         for data in hass.data.get(DOMAIN, {}).values():
-            if not isinstance(data, dict) or "coordinator" not in data:
+            if not isinstance(data, dict) or "coordinator" not in data or "api" not in data:
                 continue
             coordinator = data["coordinator"]
-            url = CHANNEL_SEND_URL_TEMPLATE.format(channel_id=channel_id)
-            await coordinator.api.send_reading(url, value)
-            await coordinator.async_request_refresh()
-            return
-        raise HomeAssistantError("No active Waterius coordinator found")
+            api: WateriusApi = data["api"]
+            for source_id, channels in (coordinator.data.channels_by_source or {}).items():
+                target = next((ch for ch in channels if ch.channel_id == channel_id), None)
+                if target is None:
+                    continue
+                source = (coordinator.data.sources or {}).get(source_id)
+                key = _extract_source_universal_key(source, [])
+                if not key:
+                    raise HomeAssistantError(f"Cannot determine Waterius Universal key for source {source_id}")
+                payload: dict[str, Any] = {
+                    "key": key,
+                    "name": _source_group_name(source, list(channels)),
+                }
+                for fallback_index, channel in enumerate(sorted(channels, key=lambda ch: (_channel_number(ch, 999), ch.channel_id))):
+                    raw = channel.raw or {}
+                    index = _channel_number(channel, fallback_index)
+                    value = requested_value if channel.channel_id == channel_id else _current_channel_number_value(channel)
+                    if value is None:
+                        raise HomeAssistantError(f"Waterius channel {channel.channel_id} has no current value")
+                    payload[f"ch{index}"] = value
+                    payload[f"data_type{index}"] = int(raw.get("data_type", 10))
+                    serial = str(raw.get("serial") or "").strip()
+                    if serial:
+                        payload[f"serial{index}"] = serial
+                await api.send_universal_payload(UC_SEND_URL, payload)
+                await coordinator.async_request_refresh()
+                return
+        raise HomeAssistantError(f"Waterius channel not found: {channel_id}")
 
     async def handle_send_all(call: ServiceCall) -> None:
         entry = _get_entry(hass, call.data.get("entry_id"))
